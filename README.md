@@ -23,7 +23,7 @@ https://zahra-z1-biorag-app-lswtdv.streamlit.app/
 * Document-title-aware reranking
 * Definition-aware retrieval
 * Source and page citations
-* Retrieval confidence scores
+* Retrieval relevance scores
 * Extractive grounded answers
 * Optional Transformer-based generation
 * Streamlit frontend
@@ -42,6 +42,7 @@ You can ask questions such as:
 * What is transcription?
 * Explain DNA replication.
 * Explain the structure of proteins.
+* What is DNA?
 
 ---
 
@@ -55,6 +56,7 @@ BIORAG/
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
+├── README.md
 │
 ├── src/
 │   ├── config.py
@@ -90,17 +92,24 @@ User Question
       ↓
 Question Analysis
       ↓
-Lexical Retrieval
-      +
-Semantic Retrieval
-      ↓
-Candidate Reranking
-      ↓
-Relevant PDF Chunks
-      ↓
-Grounded Answer Extraction
-      ↓
-Answer + Source + Page + Relevance
+ ┌───────────────┐
+ │               │
+ ▼               ▼
+Lexical       Semantic
+Retrieval     Retrieval
+(TF-IDF)      (Embeddings)
+ │               │
+ └───────┬───────┘
+         ↓
+ Hybrid Relevance Scoring
+         ↓
+ Candidate Reranking
+         ↓
+ Relevant PDF Chunks
+         ↓
+ Grounded Answer Extraction
+         ↓
+ Answer + Source + Page + Relevance
 ```
 
 ### 1. Document Retrieval
@@ -131,7 +140,7 @@ The application currently supports:
 * `transformers`
 * `auto`
 
-The extractive mode keeps answers grounded directly in the indexed source material.
+The `extractive` mode keeps answers grounded directly in the indexed source material.
 
 ---
 
@@ -139,7 +148,7 @@ The extractive mode keeps answers grounded directly in the indexed source materi
 
 Create a `.env` file in the project root.
 
-Example:
+Example configuration:
 
 ```env
 # Retrieval
@@ -160,59 +169,60 @@ MAX_CONTEXT_CHARS=12000
 ALLOW_MODEL_DOWNLOAD=true
 ```
 
-Do not commit your real `.env` file to GitHub.
+**Do not commit your real `.env` file to GitHub.**
 
 Use `.env.example` for public configuration examples.
 
 ---
 
-## 🚀 Run Locally
+# 🚀 Run Locally
 
-### 1. Clone the repository
+## 1. Clone the Repository
 
 ```bash
 git clone https://github.com/Zahra-z1/BIORAG.git
 cd BIORAG
 ```
 
-### 2. Create a virtual environment
+## 2. Create a Virtual Environment
 
-Using Python 3.11 is recommended.
+Python 3.11 is recommended.
 
 ```powershell
 py -3.11 -m venv .venv
 ```
 
-Activate it:
+Activate the environment:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
 ```
 
-### 3. Install dependencies
+## 3. Install Dependencies
+
+Upgrade pip:
 
 ```bash
 python -m pip install --upgrade pip
+```
+
+Install the required packages:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
+## 4. Configure Environment Variables
 
-Copy:
-
-```text
-.env.example
-```
-
-to:
+Copy `.env.example` to `.env` and update the values if required.
 
 ```text
-.env
+.env.example → .env
 ```
 
-and update the values if required.
+Do not commit the real `.env` file to GitHub.
 
-### 5. Build the knowledge index
+## 5. Build the Knowledge Index
 
 If the vector index has not already been generated:
 
@@ -220,13 +230,15 @@ If the vector index has not already been generated:
 python -m scripts.build_index
 ```
 
-### 6. Run the Streamlit frontend
+This prepares the searchable knowledge base from the PDF documents.
+
+## 6. Run the Streamlit Frontend
 
 ```bash
 streamlit run app.py --server.fileWatcherType none
 ```
 
-Open:
+Open the application at:
 
 ```text
 http://localhost:8501
@@ -234,11 +246,11 @@ http://localhost:8501
 
 ---
 
-## 🔌 Run the FastAPI Backend
+# 🔌 Run the FastAPI Backend
 
 The project also includes a FastAPI backend.
 
-Run:
+Start the backend with:
 
 ```bash
 uvicorn api:app --reload
@@ -250,7 +262,7 @@ The API will normally be available at:
 http://127.0.0.1:8000
 ```
 
-API documentation:
+Interactive API documentation:
 
 ```text
 http://127.0.0.1:8000/docs
@@ -258,7 +270,7 @@ http://127.0.0.1:8000/docs
 
 ---
 
-## 📚 Knowledge Base
+# 📚 Knowledge Base
 
 BioRAG uses biology-related PDF documents covering topics such as:
 
@@ -276,7 +288,7 @@ The application retrieves relevant passages from these documents and displays th
 
 ---
 
-## 🛠️ Technologies
+# 🛠️ Technologies
 
 * Python
 * Streamlit
@@ -291,23 +303,22 @@ The application retrieves relevant passages from these documents and displays th
 
 ---
 
-## ☁️ Deployment
+# ☁️ Deployment
 
-The Streamlit application is deployed using Streamlit Community Cloud.
+The Streamlit application is deployed using **Streamlit Community Cloud**.
 
-Live version:
-
+**Live application:**
 https://zahra-z1-biorag-app-lswtdv.streamlit.app/
 
-Updates pushed to the GitHub `main` branch can be automatically reflected in the deployed application.
+The deployed application is connected to the GitHub repository. Changes pushed to the configured GitHub branch can trigger an automatic redeployment through Streamlit Community Cloud.
 
 ---
 
-## 🔐 Security
+# 🔐 Security
 
 Sensitive configuration should never be committed to the repository.
 
-The following files/directories should remain ignored:
+The following files and directories should remain ignored:
 
 ```text
 .env
@@ -316,11 +327,11 @@ __pycache__/
 .streamlit/secrets.toml
 ```
 
-For cloud deployment, environment variables should be configured using the hosting platform's secret-management system.
+For cloud deployment, environment variables and secrets should be configured using the hosting platform's secret-management system.
 
 ---
 
-## 📌 Current Answer Mode
+# 📌 Current Answer Mode
 
 The current recommended configuration is:
 
@@ -332,6 +343,61 @@ This prioritizes grounded answers taken directly from retrieved PDF evidence.
 
 ---
 
-## 📄 License
+# 🎯 Project Goal
+
+BioRAG was developed to demonstrate the application of Retrieval-Augmented Generation to biology and bioinformatics research assistance.
+
+The project focuses on:
+
+* Domain-specific information retrieval
+* Combining lexical and semantic search
+* Improving retrieval through reranking
+* Grounding answers in source documents
+* Providing transparent source and page references
+* Building a practical research-assistance interface
+
+---
+
+# 🔮 Future Improvements
+
+Potential future improvements include:
+
+* Larger biology and biomedical knowledge bases
+* More specialized biomedical embedding models
+* Improved hybrid retrieval strategies
+* Automated retrieval and answer-quality evaluation
+* Advanced reranking models
+* Support for additional document formats
+* Improved conversational memory
+* Faster inference and indexing
+* Docker-based deployment
+* Scalable cloud deployment
+* Automated evaluation benchmarks
+
+---
+
+# ⚠️ Limitations
+
+BioRAG's answers depend on the documents available in its knowledge base.
+
+If relevant information is not present in the indexed documents, the system may not be able to provide an appropriate answer.
+
+BioRAG should therefore be treated as a **research-assistance and educational tool**, rather than a replacement for scientific literature, textbooks, or expert review.
+
+---
+
+# 📄 License
 
 No license has currently been specified for this project.
+
+If you plan to distribute or allow others to reuse the project, consider adding an appropriate open-source license such as MIT, Apache-2.0, or GPL-3.0.
+
+---
+
+## 👩‍💻 Author
+
+**Zahra**
+
+Bioinformatics Student
+
+Interested in Bioinformatics, Machine Learning, RAG Systems, and AI-powered research tools.
