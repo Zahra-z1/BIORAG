@@ -12,13 +12,8 @@ from .config import (
     MAX_NEW_TOKENS,
 )
 
-from .prompts import (
-    GENERATION_PROMPT,
-)
-
-from .retrieval import (
-    get_retriever,
-)
+from .prompts import GENERATION_PROMPT
+from .retrieval import get_retriever
 
 
 _SENTENCE_SPLIT = re.compile(
@@ -26,10 +21,7 @@ _SENTENCE_SPLIT = re.compile(
 )
 
 
-def _clean_text(
-    text: str,
-) -> str:
-
+def _clean_text(text: str) -> str:
     text = re.sub(
         r"[ \t]+",
         " ",
@@ -42,29 +34,27 @@ def _clean_text(
         text,
     )
 
+    text = re.sub(
+        r"\s+",
+        " ",
+        text,
+    )
+
     return text.strip()
 
 
-def _sentences(
-    text: str,
-):
-
+def _sentences(text: str):
     if not text:
         return []
 
     return [
         _clean_text(part)
-        for part in _SENTENCE_SPLIT.split(
-            text
-        )
+        for part in _SENTENCE_SPLIT.split(text)
         if _clean_text(part)
     ]
 
 
-def _noise_text(
-    text: str,
-) -> bool:
-
+def _noise_sentence(text: str) -> bool:
     text = (
         text
         or ""
@@ -78,7 +68,7 @@ def _noise_text(
     if "table of contents" in lower:
         return True
 
-    if re.match(
+    if re.search(
         r"^\s*(?:references|bibliography)\s*$",
         lower,
     ):
@@ -92,18 +82,9 @@ def _noise_text(
     ) >= 2:
         return True
 
-    # Do not return a review/exercise
-    # question as the answer.
-    if (
-        text.endswith("?")
-        and re.match(
-            r"^\s*(?:"
-            r"what|which|who|where|when|why|how|"
-            r"define|describe|explain|discuss|compare"
-            r")\b",
-            lower,
-        )
-    ):
+    # A question appearing inside a textbook
+    # should not itself become the answer.
+    if text.endswith("?"):
         return True
 
     if len(
@@ -114,13 +95,39 @@ def _noise_text(
     ) >= 3:
         return True
 
+    if len(
+        re.findall(
+            r"\[[0-9,\-– ]+\]",
+            text,
+        )
+    ) >= 5:
+        return True
+
+    letters = [
+        char
+        for char in text
+        if char.isalpha()
+    ]
+
+    if letters:
+        upper_ratio = (
+            sum(
+                char.isupper()
+                for char in letters
+            )
+            / len(letters)
+        )
+
+        if (
+            upper_ratio > 0.78
+            and len(text) > 100
+        ):
+            return True
+
     return False
 
 
-def _tokens(
-    text: str,
-):
-
+def _tokens(text: str):
     return {
         token.lower()
         for token in re.findall(
@@ -134,23 +141,63 @@ def _tokens(
 def _jaccard(
     first: str,
     second: str,
-):
+) -> float:
 
-    a = _tokens(first)
-    b = _tokens(second)
+    first_tokens = _tokens(
+        first
+    )
 
-    if not a or not b:
+    second_tokens = _tokens(
+        second
+    )
+
+    if (
+        not first_tokens
+        or not second_tokens
+    ):
         return 0.0
 
     return (
-        len(a & b)
-        / len(a | b)
+        len(
+            first_tokens
+            & second_tokens
+        )
+        /
+        len(
+            first_tokens
+            | second_tokens
+        )
     )
 
 
-def _window_candidates(
+def _normalized_key(
+    text: str,
+) -> str:
+
+    return re.sub(
+        r"\W+",
+        " ",
+        (
+            text
+            or ""
+        ).lower(),
+    ).strip()
+
+
+def _sentence_candidates(
     evidence,
 ):
+    """
+    Create ONE answer sentence per candidate.
+
+    The reranker sees nearby context, but only
+    the central sentence is returned.
+
+    This prevents duplicate nested windows such as:
+    - sentence A
+    - sentence A + sentence B
+    - sentence A + sentence B + sentence C
+    """
 
     candidates = []
 
@@ -160,196 +207,181 @@ def _window_candidates(
         evidence
     ):
 
-        sentences = [
-            sentence
-            for sentence in _sentences(
-                item.get(
-                    "text",
-                    "",
-                )
+        raw_sentences = _sentences(
+            item.get(
+                "text",
+                "",
             )
-            if not _noise_text(
-                sentence
-            )
-        ]
+        )
 
-        if not sentences:
+        if not raw_sentences:
+            continue
 
-            text = _clean_text(
-                item.get(
-                    "text",
-                    "",
-                )
-            )
-
-            if text:
-                sentences = [text]
-
-        # Score one-, two- and three-sentence
-        # answer windows.
-        for size in (
-            1,
-            2,
-            3,
+        for index, sentence in enumerate(
+            raw_sentences
         ):
 
-            for start in range(
-                len(sentences)
+            if _noise_sentence(
+                sentence
             ):
+                continue
 
-                end = (
-                    start
-                    + size
+            key = _normalized_key(
+                sentence
+            )
+
+            if (
+                not key
+                or key in seen
+            ):
+                continue
+
+            seen.add(
+                key
+            )
+
+            # The CrossEncoder gets the previous
+            # and next sentence for context.
+            start = max(
+                0,
+                index - 1,
+            )
+
+            end = min(
+                len(
+                    raw_sentences
+                ),
+                index + 2,
+            )
+
+            context_parts = [
+                value
+                for value
+                in raw_sentences[
+                    start:end
+                ]
+                if not _noise_sentence(
+                    value
+                )
+            ]
+
+            context = _clean_text(
+                " ".join(
+                    context_parts
+                )
+            )
+
+            section = (
+                item.get(
+                    "section",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            score_parts = []
+
+            if section:
+                score_parts.append(
+                    f"Section: {section}"
                 )
 
-                if end > len(sentences):
-                    break
+            score_parts.append(
+                context
+                or sentence
+            )
 
-                window = _clean_text(
-                    " ".join(
-                        sentences[
-                            start:end
-                        ]
-                    )
-                )
+            candidates.append(
+                {
+                    "text":
+                        sentence,
 
-                if (
-                    len(window) < 35
-                    or len(window) > 1100
-                ):
-                    continue
+                    "score_text":
+                        "\n".join(
+                            score_parts
+                        ),
 
-                key = re.sub(
-                    r"\W+",
-                    " ",
-                    window.lower(),
-                ).strip()
+                    "source":
+                        item.get(
+                            "source",
+                            "Unknown source",
+                        ),
 
-                if (
-                    not key
-                    or key in seen
-                ):
-                    continue
+                    "page":
+                        item.get(
+                            "page",
+                            "?",
+                        ),
 
-                seen.add(
-                    key
-                )
+                    "section":
+                        section,
 
-                section = (
-                    item.get(
-                        "section",
-                        "",
-                    )
-                    or ""
-                ).strip()
+                    "evidence_rank":
+                        evidence_rank,
 
-                if section:
-
-                    score_text = (
-                        f"Section: {section}\n"
-                        f"{window}"
-                    )
-
-                else:
-
-                    score_text = (
-                        window
-                    )
-
-                candidates.append(
-                    {
-                        "text":
-                            window,
-
-                        "score_text":
-                            score_text,
-
-                        "source":
+                    "retrieval_score":
+                        float(
                             item.get(
-                                "source",
-                                "Unknown source",
-                            ),
-
-                        "page":
-                            item.get(
-                                "page",
-                                "?",
-                            ),
-
-                        "evidence_rank":
-                            evidence_rank,
-
-                        "retrieval_score":
-                            float(
-                                item.get(
-                                    "score",
-                                    0.0,
-                                )
-                            ),
-                    }
-                )
+                                "score",
+                                0.0,
+                            )
+                        ),
+                }
+            )
 
     return candidates
 
 
-def extractive_answer(
-    question,
+def _select_diverse_candidates(
+    question: str,
     evidence,
 ):
-
-    if not evidence:
-        return (
-            "I could not find enough evidence "
-            "in the indexed PDFs to answer "
-            "this question."
-        )
-
-    retriever = (
-        get_retriever()
-    )
-
     candidates = (
-        _window_candidates(
+        _sentence_candidates(
             evidence
         )
     )
 
     if not candidates:
+        return []
 
-        best = evidence[0]
+    retriever = (
+        get_retriever()
+    )
 
-        return (
-            f"{_clean_text(best.get('text', ''))} "
-            f"[Source: "
-            f"{best.get('source', 'Unknown source')}, "
-            f"p. {best.get('page', '?')}]"
-        )
-
-    scores = (
+    model_scores = (
         retriever.score_texts(
             question,
             [
-                item["score_text"]
-                for item in candidates
+                item[
+                    "score_text"
+                ]
+                for item
+                in candidates
             ],
         )
     )
 
     for candidate, model_score in zip(
         candidates,
-        scores,
+        model_scores,
     ):
 
-        # Sentence/window relevance dominates.
+        candidate[
+            "model_score"
+        ] = float(
+            model_score
+        )
+
         candidate[
             "answer_score"
         ] = (
-            0.84
+            0.86
             * float(
                 model_score
             )
 
-            + 0.16
+            + 0.14
             * candidate[
                 "retrieval_score"
             ]
@@ -369,79 +401,247 @@ def extractive_answer(
         ]
     )
 
-    selected = []
+    # Keep enough evidence for explanation/list
+    # questions, but reject weak unrelated text.
+    minimum_score = max(
+        ANSWER_WINDOW_THRESHOLD,
+        best_score * 0.62,
+    )
 
-    for candidate in candidates:
-
-        score = float(
-            candidate[
+    pool = [
+        item
+        for item
+        in candidates[:40]
+        if float(
+            item[
                 "answer_score"
             ]
+        ) >= minimum_score
+    ]
+
+    if not pool:
+        pool = [
+            candidates[0]
+        ]
+
+    selected = []
+
+    per_page = {}
+
+    while (
+        pool
+        and len(selected)
+        < ANSWER_WINDOW_COUNT
+    ):
+
+        best_item = None
+
+        best_value = float(
+            "-inf"
         )
 
-        if selected:
+        for candidate in pool:
 
-            minimum = max(
-                ANSWER_WINDOW_THRESHOLD,
-                best_score * 0.72,
+            relevance = float(
+                candidate[
+                    "answer_score"
+                ]
             )
 
-            if score < minimum:
-                continue
+            redundancy = max(
+                (
+                    _jaccard(
+                        candidate[
+                            "text"
+                        ],
+                        chosen[
+                            "text"
+                        ],
+                    )
+                    for chosen
+                    in selected
+                ),
+                default=0.0,
+            )
+
+            page_key = (
+                candidate[
+                    "source"
+                ],
+                candidate[
+                    "page"
+                ],
+            )
+
+            page_count = (
+                per_page.get(
+                    page_key,
+                    0,
+                )
+            )
+
+            # Prefer different useful information
+            # rather than five similar sentences
+            # from one page.
+            diversity_penalty = (
+                0.10
+                * page_count
+            )
+
+            # Maximal Marginal Relevance.
+            value = (
+                0.78
+                * relevance
+
+                - 0.22
+                * redundancy
+
+                - diversity_penalty
+            )
+
+            if value > best_value:
+
+                best_value = (
+                    value
+                )
+
+                best_item = (
+                    candidate
+                )
+
+        if best_item is None:
+            break
+
+        best_key = (
+            _normalized_key(
+                best_item[
+                    "text"
+                ]
+            )
+        )
 
         duplicate = False
 
         for chosen in selected:
 
-            if (
-                _jaccard(
-                    candidate["text"],
-                    chosen["text"],
+            chosen_key = (
+                _normalized_key(
+                    chosen[
+                        "text"
+                    ]
                 )
-                >= 0.72
+            )
+
+            if (
+                best_key
+                == chosen_key
+
+                or best_key
+                in chosen_key
+
+                or chosen_key
+                in best_key
+
+                or _jaccard(
+                    best_item[
+                        "text"
+                    ],
+                    chosen[
+                        "text"
+                    ],
+                ) >= 0.66
             ):
+
                 duplicate = True
+
                 break
+
+        pool.remove(
+            best_item
+        )
 
         if duplicate:
             continue
 
         selected.append(
-            candidate
+            best_item
         )
 
-        if (
-            len(selected)
-            >= ANSWER_WINDOW_COUNT
-        ):
-            break
+        page_key = (
+            best_item[
+                "source"
+            ],
+            best_item[
+                "page"
+            ],
+        )
+
+        per_page[
+            page_key
+        ] = (
+            per_page.get(
+                page_key,
+                0,
+            )
+            + 1
+        )
+
+    return selected
+
+
+def extractive_answer(
+    question,
+    evidence,
+):
+
+    if not evidence:
+
+        return (
+            "I could not find enough evidence "
+            "in the indexed PDFs to answer "
+            "this question."
+        )
+
+    selected = (
+        _select_diverse_candidates(
+            question,
+            evidence,
+        )
+    )
 
     if not selected:
-        selected = [
-            candidates[0]
-        ]
 
-    first = selected[0]
+        best = evidence[0]
 
-    lines = [
-        (
-            f"{first['text']} "
+        return (
+            f"{_clean_text(best.get('text', ''))} "
             f"[Source: "
-            f"{first['source']}, "
-            f"p. {first['page']}]"
+            f"{best.get('source', 'Unknown source')}, "
+            f"p. {best.get('page', '?')}]"
         )
-    ]
 
-    for item in selected[1:]:
+    lines = []
 
-        lines.append(
-            (
-                f"- {item['text']} "
-                f"[Source: "
-                f"{item['source']}, "
-                f"p. {item['page']}]"
+    for index, item in enumerate(
+        selected
+    ):
+
+        cited = (
+            f"{item['text']} "
+            f"[Source: "
+            f"{item['source']}, "
+            f"p. {item['page']}]"
+        )
+
+        if index == 0:
+            lines.append(
+                cited
             )
-        )
+
+        else:
+            lines.append(
+                f"- {cited}"
+            )
 
     return "\n".join(
         lines
@@ -508,10 +708,12 @@ class LocalGenerator:
             )
         )
 
-        self.device = torch.device(
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
+        self.device = (
+            torch.device(
+                "cuda"
+                if torch.cuda.is_available()
+                else "cpu"
+            )
         )
 
         self.model.to(
@@ -533,11 +735,13 @@ class LocalGenerator:
                 "model_max_length",
                 None,
             ),
+
             getattr(
                 self.model.config,
                 "max_position_embeddings",
                 None,
             ),
+
             getattr(
                 self.model.config,
                 "n_positions",
@@ -554,6 +758,7 @@ class LocalGenerator:
                 <= value
                 < 100000
             ):
+
                 values.append(
                     value
                 )
@@ -585,7 +790,8 @@ class LocalGenerator:
             )
 
             if (
-                used + len(block)
+                used
+                + len(block)
                 > MAX_CONTEXT_CHARS
             ):
 
@@ -595,8 +801,11 @@ class LocalGenerator:
                 )
 
                 if remaining > 250:
+
                     context_parts.append(
-                        block[:remaining]
+                        block[
+                            :remaining
+                        ]
                     )
 
                 break
@@ -605,10 +814,13 @@ class LocalGenerator:
                 block
             )
 
-            used += len(block)
+            used += len(
+                block
+            )
 
         prompt = (
-            GENERATION_PROMPT.format(
+            GENERATION_PROMPT
+            .format(
                 question=question,
                 context="\n\n".join(
                     context_parts
@@ -662,6 +874,7 @@ class LocalGenerator:
             self.tokenizer.pad_token_id
             is not None
         ):
+
             kwargs[
                 "pad_token_id"
             ] = (
@@ -680,7 +893,9 @@ class LocalGenerator:
 
         if self.is_encoder_decoder:
 
-            tokens = output[0]
+            tokens = (
+                output[0]
+            )
 
         else:
 
@@ -690,9 +905,11 @@ class LocalGenerator:
                 ].shape[1]
             )
 
-            tokens = output[0][
-                input_length:
-            ]
+            tokens = (
+                output[0][
+                    input_length:
+                ]
+            )
 
         return (
             self.tokenizer.decode(
@@ -723,7 +940,6 @@ def generate_answer(
             "none",
         )
 
-    # Recommended mode.
     if GENERATION_BACKEND in {
         "extractive",
         "reranked-extractive",
@@ -749,11 +965,15 @@ def generate_answer(
                 and _generator_error
                 is None
             ):
+
                 _generator = (
                     LocalGenerator()
                 )
 
-            if _generator is not None:
+            if (
+                _generator
+                is not None
+            ):
 
                 answer = (
                     _generator.generate(
