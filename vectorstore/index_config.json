@@ -1,0 +1,7 @@
+{
+  "embedding_model": "sentence-transformers/multi-qa-MiniLM-L6-cos-v1",
+  "chunk_size": 1400,
+  "chunk_overlap": 250,
+  "pdf_pages": 293,
+  "chunks": 867
+}

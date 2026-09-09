@@ -1,45 +1,39 @@
 from __future__ import annotations
 
 import json
-import math
 import re
+
 from collections import Counter
+from pathlib import Path
 
 import numpy as np
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+
+from sklearn.feature_extraction.text import (
+    TfidfVectorizer,
+)
+
+from sklearn.metrics.pairwise import (
+    cosine_similarity,
+)
 
 from .config import (
     ALLOW_MODEL_DOWNLOAD,
+    EMBEDDING_MODEL,
     ENABLE_RERANKER,
     ENABLE_SEMANTIC,
-    EMBEDDING_MODEL,
     FAISS_INDEX_PATH,
+    INDEX_CONFIG_PATH,
+    LEXICAL_CANDIDATES,
     METADATA_PATH,
     RELEVANCE_THRESHOLD,
+    RERANK_CANDIDATES,
     RERANKER_MODEL,
+    SEMANTIC_CANDIDATES,
     TOP_K,
 )
 
 
-STOP = {
-    "what", "which", "who", "where",
-    "when", "why", "how",
-    "does", "do", "did",
-    "is", "are", "was", "were",
-    "be", "being", "been",
-    "a", "an", "the",
-    "of", "to", "for", "from",
-    "in", "on", "with",
-    "and", "or", "about",
-    "please", "tell", "me",
-    "explain", "describe",
-    "define", "give",
-}
-
-
-def normalize(text: str) -> str:
-
+def _normalize(text: str) -> str:
     return re.sub(
         r"\s+",
         " ",
@@ -51,454 +45,91 @@ def normalize(text: str) -> str:
     ).strip()
 
 
-def words(text: str):
-
-    return re.findall(
-        r"[A-Za-z][A-Za-z0-9_-]{1,}",
-        (text or "").lower(),
-    )
-
-
-def canon(token: str) -> str:
-
-    token = token.lower()
-
-    if (
-        token.endswith("ies")
-        and len(token) > 4
-    ):
-        return token[:-3] + "y"
-
-    if (
-        token.endswith("s")
-        and len(token) > 3
-        and not token.endswith("ss")
-    ):
-        return token[:-1]
-
-    return token
-
-
-def query_terms(text: str):
-
-    result = []
-
-    for token in words(text):
-
-        if (
-            token in STOP
-            or len(token) <= 2
-        ):
-            continue
-
-        token = canon(token)
-
-        if token not in result:
-            result.append(token)
-
-    return result
-
-
-def intent(question: str) -> str:
-
-    q = (
-        question
-        or ""
-    ).strip().lower()
-
-    if re.match(
-        r"^(?:"
-        r"what\s+(?:is|are)|"
-        r"define"
-        r")\b",
-        q,
-    ):
-        return "definition"
-
-    if re.search(
-        r"\b(?:"
-        r"phases?|stages?|steps?|"
-        r"types?|levels?|"
-        r"components?|parts?"
-        r")\b",
-        q,
-    ):
-        return "list"
-
-    if re.match(
-        r"^(?:"
-        r"explain|describe|how"
-        r")\b",
-        q,
-    ):
-        return "explanation"
-
-    return "general"
-
-
-def subject(question: str) -> str:
-
-    q = (
-        question
-        or ""
-    ).strip().rstrip("?.!")
-
-    patterns = [
-        r"^(?:what|which)\s+(?:is|are)\s+(.+)$",
-        r"^define\s+(.+)$",
-        r"^(?:explain|describe)\s+(.+)$",
-    ]
-
-    for pattern in patterns:
-
-        match = re.match(
-            pattern,
-            q,
-            re.I,
-        )
-
-        if match:
-
-            return re.sub(
-                r"^(?:a|an|the)\s+",
-                "",
-                match.group(1).strip(),
-                flags=re.I,
-            )
-
-    # Example:
-    # "cell cycle phases"
-    # becomes
-    # "cell cycle"
-
-    cleaned = re.sub(
-        r"\b(?:"
-        r"phases?|stages?|steps?|"
-        r"types?|levels?|"
-        r"components?|parts?"
-        r")\b",
-        " ",
-        q,
-        flags=re.I,
-    )
-
-    return re.sub(
-        r"\s+",
-        " ",
-        cleaned,
-    ).strip()
-
-
-def subject_tokens(text: str):
-
-    return [
-        canon(token)
-        for token in words(text)
-        if (
-            token not in STOP
-            and len(token) > 2
-        )
-    ]
-
-
-def contains_subject(
-    text: str,
-    requested_subject: str,
-):
-
-    wanted = set(
-        subject_tokens(
-            requested_subject
-        )
-    )
-
-    if not wanted:
-        return False
-
-    available = {
-        canon(token)
-        for token in words(text)
-    }
-
-    return wanted.issubset(
-        available
-    )
-
-
-def definition_score(
-    text: str,
-    requested_subject: str,
-):
-
-    terms = subject_tokens(
-        requested_subject
-    )
-
-    if (
-        not terms
-        or not contains_subject(
-            text,
-            requested_subject,
-        )
-    ):
-        return 0.0
-
-    pattern = r"\s+".join(
-        re.escape(term)
-        + r"s?"
-        for term in terms
-    )
-
-    normalized = normalize(
-        text
-    )
-
-    best = 0.0
-
-    patterns = [
-        (
-            rf"\b{pattern}\s+"
-            rf"(?:means|refers\s+to)\b",
-            1.0,
-        ),
-
-        (
-            rf"\b{pattern}\s+"
-            rf"(?:can\s+be\s+)?"
-            rf"defined\s+as\b",
-            1.0,
-        ),
-
-        (
-            rf"\b(?:the\s+)?"
-            rf"{pattern}\s+"
-            rf"(?:is|are)\s+"
-            rf"(?:a|an|the)\b",
-            0.98,
-        ),
-
-        (
-            rf"\b(?:the\s+)?"
-            rf"{pattern}\s+"
-            rf"(?:"
-            rf"consists\s+of|"
-            rf"comprises|includes|contains"
-            rf")\b",
-            0.82,
-        ),
-
-        # Reverse definition:
-        # "A segment ... is called a gene."
-        (
-            rf"\b(?:is|are)\s+"
-            rf"(?:"
-            rf"called|known\s+as|termed"
-            rf")\s+"
-            rf"(?:a\s+|an\s+|the\s+)?"
-            rf"{pattern}\b",
-            1.0,
-        ),
-    ]
-
-    for regex, value in patterns:
-
-        if re.search(
-            regex,
-            normalized,
-            re.I,
-        ):
-
-            best = max(
-                best,
-                value,
-            )
-
-    # Prevent false definition:
-    #
-    # "Transcription is initiated..."
-    #
-    # does NOT define transcription.
-
-    bad = re.search(
-        rf"\b{pattern}\s+"
-        rf"(?:is|are)\s+"
-        rf"(?:"
-        rf"initiated|regulated|"
-        rf"inhibited|activated|"
-        rf"performed|started|terminated"
-        rf")\b",
-        normalized,
-        re.I,
-    )
-
-    if (
-        bad
-        and best < 0.80
-    ):
-        return 0.05
-
-    return best
-
-
-def list_score(
-    text: str,
-    requested_subject: str,
-):
-
-    if not contains_subject(
-        text,
-        requested_subject,
-    ):
-        return 0.0
-
-    normalized = normalize(
-        text
-    )
-
-    markers = [
-        "phase",
-        "stage",
-        "step",
-        "first",
-        "second",
-        "third",
-        "then",
-        "next",
-        "finally",
-
-        "g0",
-        "g1",
-        "g2",
-        "s phase",
-        "m phase",
-
-        "prophase",
-        "metaphase",
-        "anaphase",
-        "telophase",
-
-        "primary",
-        "secondary",
-        "tertiary",
-        "quaternary",
-    ]
-
-    hits = sum(
-        1
-        for marker in markers
-        if marker in normalized
-    )
-
-    return min(
-        1.0,
-        0.25
-        + 0.10 * hits,
-    )
-
-
-def title_score(
-    source: str,
-    requested_subject: str,
-):
-
-    title = {
-        canon(token)
-        for token in words(
-            re.sub(
-                r"\.pdf$",
-                "",
-                source or "",
-                flags=re.I,
-            )
-        )
-        if token not in STOP
-    }
-
-    wanted = set(
-        subject_tokens(
-            requested_subject
-        )
-    )
-
-    if (
-        not title
-        or not wanted
-    ):
-        return 0.0
-
-    overlap = (
-        len(
-            title & wanted
-        )
-        / len(wanted)
-    )
-
-    return min(
-        1.0,
-        overlap,
-    )
-
-
-def content_penalty(
-    text: str,
-):
-
-    lower = (
-        text
-        or ""
-    ).lower()
-
-    penalty = 0.0
-
-    if "table of contents" in lower:
-        penalty += 0.70
-
-    if (
-        "references" in lower
-        or "bibliography" in lower
-    ):
-        penalty += 0.55
-
-    if len(
-        re.findall(
-            r"(?:https?://|www\.)",
-            lower,
-        )
-    ) >= 3:
-        penalty += 0.20
-
-    if len(
-        re.findall(
-            r"\b(?:19|20)\d{2}\b",
-            text or "",
-        )
-    ) >= 6:
-        penalty += 0.20
-
-    return min(
-        0.85,
-        penalty,
-    )
-
-
-def sigmoid(value: float):
-
-    value = max(
-        -20.0,
+def _safe_score(
+    value: float,
+) -> float:
+    return max(
+        0.0,
         min(
-            20.0,
+            1.0,
             float(value),
         ),
     )
 
-    return (
-        1.0
-        / (
-            1.0
-            + math.exp(
-                -value
-            )
+
+def _noise_penalty(
+    text: str,
+) -> float:
+
+    text = text or ""
+
+    lower = text.lower()
+
+    penalty = 0.0
+
+    if "table of contents" in lower:
+        penalty += 0.75
+
+    if re.search(
+        r"\b(?:references|bibliography)\b",
+        lower,
+    ):
+        penalty += 0.55
+
+    if text.count("....") >= 2:
+        penalty += 0.35
+
+    # Review/question pages often contain
+    # the exact user question but no answer.
+    question_signals = len(
+        re.findall(
+            r"\b(?:"
+            r"what|which|who|where|when|why|how|"
+            r"define|describe|explain|discuss|compare"
+            r")\b",
+            lower,
         )
+    )
+
+    if question_signals >= 5:
+        penalty += 0.55
+
+    if lower.count("?") >= 4:
+        penalty += 0.45
+
+    urls = len(
+        re.findall(
+            r"(?:https?://|www\.)",
+            lower,
+        )
+    )
+
+    if urls >= 3:
+        penalty += 0.25
+
+    years = len(
+        re.findall(
+            r"\b(?:19|20)\d{2}\b",
+            text,
+        )
+    )
+
+    if years >= 7:
+        penalty += 0.20
+
+    citations = len(
+        re.findall(
+            r"\[[0-9,\-– ]+\]",
+            text,
+        )
+    )
+
+    if citations >= 8:
+        penalty += 0.15
+
+    return min(
+        penalty,
+        0.85,
     )
 
 
@@ -506,15 +137,13 @@ class Retriever:
 
     def __init__(
         self,
-        enable_semantic: bool | None = None,
+        enable_semantic=None,
     ):
 
         if not METADATA_PATH.exists():
-
             raise FileNotFoundError(
-                "Knowledge-base metadata "
-                "is missing. Run: "
-                "python -m scripts.build_index"
+                "Knowledge-base index missing. "
+                "Run: python -m scripts.build_index"
             )
 
         self.metadata = json.loads(
@@ -524,28 +153,50 @@ class Retriever:
         )
 
         if not self.metadata:
-
             raise RuntimeError(
-                "Knowledge-base metadata "
-                "is empty."
+                "Knowledge-base metadata is empty."
             )
 
         self.texts = [
-            item["text"]
+            item.get(
+                "text",
+                "",
+            )
             for item in self.metadata
         ]
 
-        self.vectorizer = (
+        # Normal word retrieval.
+        self.word_vectorizer = (
             TfidfVectorizer(
                 stop_words="english",
                 ngram_range=(1, 2),
+                min_df=1,
+                max_df=0.995,
                 sublinear_tf=True,
                 strip_accents="unicode",
             )
         )
 
-        self.matrix = (
-            self.vectorizer
+        self.word_matrix = (
+            self.word_vectorizer
+            .fit_transform(
+                self.texts
+            )
+        )
+
+        # Helps with bad PDF extraction,
+        # spelling variation and split words.
+        self.char_vectorizer = (
+            TfidfVectorizer(
+                analyzer="char_wb",
+                ngram_range=(3, 5),
+                min_df=1,
+                sublinear_tf=True,
+            )
+        )
+
+        self.char_matrix = (
+            self.char_vectorizer
             .fit_transform(
                 self.texts
             )
@@ -559,6 +210,7 @@ class Retriever:
 
         self._semantic_ready = False
         self._semantic_note = None
+
         self._index = None
         self._embedder = None
 
@@ -576,19 +228,47 @@ class Retriever:
             return
 
         if not FAISS_INDEX_PATH.exists():
-
             self._semantic_note = (
                 "FAISS index not present"
             )
 
             return
 
-        try:
+        # Do not accidentally use an old
+        # FAISS index built using another model.
+        if INDEX_CONFIG_PATH.exists():
 
+            try:
+                config = json.loads(
+                    INDEX_CONFIG_PATH.read_text(
+                        encoding="utf-8",
+                    )
+                )
+
+                built_model = config.get(
+                    "embedding_model"
+                )
+
+                if (
+                    built_model
+                    and built_model
+                    != EMBEDDING_MODEL
+                ):
+                    self._semantic_note = (
+                        "Embedding model changed. "
+                        "Rebuild index."
+                    )
+
+                    return
+
+            except Exception:
+                pass
+
+        try:
             import faiss
 
             from .embeddings import (
-                EmbeddingModel
+                EmbeddingModel,
             )
 
             index = faiss.read_index(
@@ -601,9 +281,9 @@ class Retriever:
                 index.ntotal
                 != len(self.metadata)
             ):
-
                 self._semantic_note = (
-                    "FAISS metadata mismatch"
+                    "FAISS and metadata mismatch. "
+                    "Rebuild index."
                 )
 
                 return
@@ -619,7 +299,6 @@ class Retriever:
             self._semantic_ready = True
 
         except Exception as exc:
-
             self._semantic_note = str(
                 exc
             )
@@ -635,7 +314,6 @@ class Retriever:
             return
 
         if not ALLOW_MODEL_DOWNLOAD:
-
             self._reranker_note = (
                 "Reranker download disabled"
             )
@@ -643,112 +321,90 @@ class Retriever:
             return
 
         try:
+            import torch
 
             from sentence_transformers import (
-                CrossEncoder
+                CrossEncoder,
             )
 
             self._reranker = (
                 CrossEncoder(
                     RERANKER_MODEL,
+                    activation_fn=(
+                        torch.nn.Sigmoid()
+                    ),
                     max_length=512,
                 )
             )
 
         except Exception as exc:
-
             self._reranker_note = str(
                 exc
             )
 
 
-    def _lexical(
+    def _lexical_scores(
         self,
-        question: str,
+        query: str,
     ):
 
-        requested_subject = (
-            subject(
-                question
+        word_query = (
+            self.word_vectorizer
+            .transform(
+                [query]
             )
         )
 
-        query_intent = (
-            intent(
-                question
+        char_query = (
+            self.char_vectorizer
+            .transform(
+                [query]
             )
         )
 
-        variants = [
-            question,
-        ]
+        if word_query.nnz:
 
-        if requested_subject:
-
-            variants.append(
-                requested_subject
-            )
-
-            if query_intent == "definition":
-
-                variants.extend(
-                    [
-                        f"{requested_subject} definition",
-                        f"{requested_subject} means",
-                        f"called {requested_subject}",
-                    ]
-                )
-
-            elif query_intent == "list":
-
-                variants.append(
-                    f"{requested_subject} "
-                    f"phases stages steps"
-                )
-
-            else:
-
-                variants.append(
-                    f"{requested_subject} "
-                    f"mechanism process explanation"
-                )
-
-        scores = np.zeros(
-            len(self.metadata),
-            dtype=np.float32,
-        )
-
-        for variant in variants:
-
-            vector = (
-                self.vectorizer
-                .transform(
-                    [variant]
-                )
-            )
-
-            if vector.nnz == 0:
-                continue
-
-            current = (
+            word_scores = (
                 cosine_similarity(
-                    vector,
-                    self.matrix,
+                    word_query,
+                    self.word_matrix,
                 )[0]
             )
 
-            scores = np.maximum(
-                scores,
-                current,
+        else:
+            word_scores = np.zeros(
+                len(self.metadata)
             )
 
-        return scores
+        if char_query.nnz:
+
+            char_scores = (
+                cosine_similarity(
+                    char_query,
+                    self.char_matrix,
+                )[0]
+            )
+
+        else:
+            char_scores = np.zeros(
+                len(self.metadata)
+            )
+
+        combined = (
+            0.72 * word_scores
+            + 0.28 * char_scores
+        )
+
+        return (
+            combined,
+            word_scores,
+            char_scores,
+        )
 
 
-    def _semantic(
+    def _semantic_scores(
         self,
-        question: str,
-        count: int,
+        query: str,
     ):
 
         self._ensure_semantic()
@@ -756,111 +412,206 @@ class Retriever:
         if not self._semantic_ready:
             return {}
 
-        query_vector = np.asarray(
-            self._embedder.encode(
-                [question]
-            ),
-            dtype="float32",
+        query_vector = (
+            self._embedder
+            .encode_query(
+                query
+            )
         )
 
         scores, ids = (
             self._index.search(
-                query_vector,
+                np.asarray(
+                    query_vector,
+                    dtype="float32",
+                ),
                 min(
-                    count,
-                    len(
-                        self.metadata
-                    ),
+                    SEMANTIC_CANDIDATES,
+                    len(self.metadata),
                 ),
             )
         )
 
-        return {
-            int(index): float(score)
+        result = {}
 
-            for score, index
-            in zip(
-                scores[0],
-                ids[0],
-            )
+        for score, index in zip(
+            scores[0],
+            ids[0],
+        ):
 
-            if index >= 0
-        }
+            if index >= 0:
+                result[
+                    int(index)
+                ] = float(score)
+
+        return result
 
 
-    def _neighbors(
+    def _reranker_text(
         self,
-        ids,
-        radius=2,
+        item,
     ):
 
-        output = set(
-            ids
+        source_title = (
+            Path(
+                item.get(
+                    "source",
+                    "",
+                )
+            )
+            .stem
+            .replace(
+                "_",
+                " ",
+            )
         )
 
-        for index in list(ids):
+        section = (
+            item.get(
+                "section",
+                "",
+            )
+            or ""
+        ).strip()
 
-            source_name = (
-                self.metadata[index]
-                .get("source")
+        parts = []
+
+        if source_title:
+            parts.append(
+                f"Document: {source_title}"
             )
 
-            page = int(
-                self.metadata[index]
-                .get(
-                    "page",
-                    0,
-                )
-                or 0
+        if section:
+            parts.append(
+                f"Section: {section}"
             )
 
-            for nearby in range(
-                max(
-                    0,
-                    index - radius,
-                ),
-                min(
-                    len(self.metadata),
-                    index + radius + 1,
-                ),
-            ):
+        parts.append(
+            item.get(
+                "text",
+                "",
+            )
+        )
 
-                item = (
-                    self.metadata[
-                        nearby
-                    ]
+        return "\n".join(
+            parts
+        )
+
+
+    def score_texts(
+        self,
+        query,
+        texts,
+    ):
+
+        if not texts:
+            return []
+
+        self._ensure_reranker()
+
+        if self._reranker is not None:
+
+            try:
+                scores = (
+                    self._reranker.predict(
+                        [
+                            (
+                                query,
+                                text,
+                            )
+                            for text in texts
+                        ],
+                        show_progress_bar=False,
+                    )
                 )
 
-                if (
-                    item.get("source")
-                    != source_name
-                ):
-                    continue
+                scores = np.asarray(
+                    scores
+                ).reshape(-1)
 
-                nearby_page = int(
-                    item.get(
-                        "page",
-                        0,
-                    )
-                    or 0
+                return [
+                    _safe_score(score)
+                    for score in scores
+                ]
+
+            except Exception as exc:
+                self._reranker_note = str(
+                    exc
                 )
 
-                if abs(
-                    nearby_page
-                    - page
-                ) <= 2:
+        # Fallback if reranker cannot load.
+        word_query = (
+            self.word_vectorizer
+            .transform(
+                [query]
+            )
+        )
 
-                    output.add(
-                        nearby
-                    )
+        char_query = (
+            self.char_vectorizer
+            .transform(
+                [query]
+            )
+        )
 
-        return output
+        word_texts = (
+            self.word_vectorizer
+            .transform(
+                texts
+            )
+        )
+
+        char_texts = (
+            self.char_vectorizer
+            .transform(
+                texts
+            )
+        )
+
+        if word_query.nnz:
+
+            word_scores = (
+                cosine_similarity(
+                    word_query,
+                    word_texts,
+                )[0]
+            )
+
+        else:
+            word_scores = np.zeros(
+                len(texts)
+            )
+
+        if char_query.nnz:
+
+            char_scores = (
+                cosine_similarity(
+                    char_query,
+                    char_texts,
+                )[0]
+            )
+
+        else:
+            char_scores = np.zeros(
+                len(texts)
+            )
+
+        return [
+            _safe_score(
+                0.72 * word
+                + 0.28 * char
+            )
+            for word, char in zip(
+                word_scores,
+                char_scores,
+            )
+        ]
 
 
     def search(
         self,
         query: str,
-        top_k: int = TOP_K,
+        top_k=TOP_K,
     ):
 
         query = (
@@ -871,31 +622,17 @@ class Retriever:
         if not query:
             return []
 
-        query_intent = (
-            intent(
-                query
-            )
-        )
-
-        requested_subject = (
-            subject(
-                query
-            )
-        )
-
-        lexical = (
-            self._lexical(
-                query
-            )
+        (
+            lexical,
+            word_scores,
+            char_scores,
+        ) = self._lexical_scores(
+            query
         )
 
         semantic = (
-            self._semantic(
-                query,
-                max(
-                    100,
-                    top_k * 20,
-                ),
+            self._semantic_scores(
+                query
             )
         )
 
@@ -903,19 +640,16 @@ class Retriever:
             np.argsort(
                 lexical
             )[::-1][
-                :max(
-                    100,
-                    top_k * 20,
+                :min(
+                    LEXICAL_CANDIDATES,
+                    len(self.metadata),
                 )
             ]
         )
 
         candidate_ids = {
             int(index)
-
-            for index
-            in lexical_ids
-
+            for index in lexical_ids
             if lexical[index] > 0
         }
 
@@ -923,276 +657,185 @@ class Retriever:
             semantic.keys()
         )
 
-        # IMPORTANT:
-        #
-        # For definition/list questions,
-        # search the entire small corpus for
-        # actual answer passages.
-        #
-        # This is why:
-        #
-        # "What is translation?"
-        # should find an actual definition,
-        #
-        # not "comparison of translation".
+        if not candidate_ids:
+            return []
 
-        if query_intent in {
-            "definition",
-            "list",
-        }:
-
-            for index, item in enumerate(
-                self.metadata
-            ):
-
-                text = item.get(
-                    "text",
-                    "",
+        max_lexical = max(
+            (
+                float(
+                    lexical[index]
                 )
-
-                if not contains_subject(
-                    text,
-                    requested_subject,
-                ):
-                    continue
-
-                if (
-                    query_intent
-                    == "definition"
-                ):
-
-                    if definition_score(
-                        text,
-                        requested_subject,
-                    ) >= 0.75:
-
-                        candidate_ids.add(
-                            index
-                        )
-
-                else:
-
-                    if list_score(
-                        text,
-                        requested_subject,
-                    ) >= 0.45:
-
-                        candidate_ids.add(
-                            index
-                        )
-
-        candidate_ids = (
-            self._neighbors(
-                candidate_ids
-            )
-        )
-
-        candidates = list(
-            candidate_ids
-        )
-
-        # REAL second-stage reranking
-
-        self._ensure_reranker()
-
-        reranker_scores = {}
-
-        if (
-            self._reranker is not None
-            and candidates
-        ):
-
-            pairs = [
-                (
-                    query,
-                    self.metadata[index]
-                    .get(
-                        "text",
-                        "",
-                    )[:3500],
-                )
-
                 for index
-                in candidates
-            ]
+                in candidate_ids
+            ),
+            default=1.0,
+        )
 
-            predictions = (
-                self._reranker.predict(
-                    pairs,
-                    show_progress_bar=False,
+        if max_lexical <= 0:
+            max_lexical = 1.0
+
+        candidates = []
+
+        for index in candidate_ids:
+
+            lexical_norm = (
+                float(
+                    lexical[index]
+                )
+                / max_lexical
+            )
+
+            lexical_norm = (
+                _safe_score(
+                    lexical_norm
                 )
             )
 
-            values = np.asarray(
-                predictions
-            ).reshape(-1)
-
-            for index, value in zip(
-                candidates,
-                values,
-            ):
-
-                reranker_scores[
-                    index
-                ] = sigmoid(
-                    float(value)
+            semantic_norm = (
+                _safe_score(
+                    max(
+                        0.0,
+                        semantic.get(
+                            index,
+                            0.0,
+                        ),
+                    )
                 )
+            )
+
+            if semantic:
+
+                preliminary = (
+                    0.48
+                    * lexical_norm
+
+                    + 0.52
+                    * semantic_norm
+                )
+
+            else:
+
+                preliminary = (
+                    lexical_norm
+                )
+
+            candidates.append(
+                (
+                    preliminary,
+                    index,
+                    lexical_norm,
+                    semantic_norm,
+                )
+            )
+
+        candidates.sort(
+            key=lambda item:
+                item[0],
+            reverse=True,
+        )
+
+        candidates = candidates[
+            :min(
+                RERANK_CANDIDATES,
+                len(candidates),
+            )
+        ]
+
+        reranker_passages = [
+            self._reranker_text(
+                self.metadata[index]
+            )
+            for (
+                _,
+                index,
+                _,
+                _,
+            ) in candidates
+        ]
+
+        reranker_scores = (
+            self.score_texts(
+                query,
+                reranker_passages,
+            )
+        )
 
         ranked = []
 
-        for index in candidates:
+        for (
+            preliminary,
+            index,
+            lexical_norm,
+            semantic_norm,
+        ), reranker_score in zip(
+            candidates,
+            reranker_scores,
+        ):
 
             item = dict(
-                self.metadata[
-                    index
-                ]
-            )
-
-            text = item.get(
-                "text",
-                "",
-            )
-
-            lexical_score = min(
-                1.0,
-                float(
-                    lexical[
-                        index
-                    ]
-                )
-                * 4.0,
-            )
-
-            semantic_raw = max(
-                0.0,
-                float(
-                    semantic.get(
-                        index,
-                        0.0,
-                    )
-                ),
-            )
-
-            semantic_score = max(
-                0.0,
-                min(
-                    1.0,
-                    (
-                        semantic_raw
-                        - 0.15
-                    )
-                    / 0.55,
-                ),
-            )
-
-            rerank_score = (
-                reranker_scores.get(
-                    index,
-                    0.0,
-                )
-            )
-
-            definition_value = (
-                definition_score(
-                    text,
-                    requested_subject,
-                )
-                if (
-                    query_intent
-                    == "definition"
-                )
-                else 0.0
-            )
-
-            list_value = (
-                list_score(
-                    text,
-                    requested_subject,
-                )
-                if (
-                    query_intent
-                    == "list"
-                )
-                else 0.0
-            )
-
-            document_score = (
-                title_score(
-                    item.get(
-                        "source",
-                        "",
-                    ),
-                    requested_subject,
-                )
+                self.metadata[index]
             )
 
             penalty = (
-                content_penalty(
-                    text
+                _noise_penalty(
+                    item.get(
+                        "text",
+                        "",
+                    )
                 )
             )
 
             if self._reranker is not None:
 
-                final_score = (
-                    0.58
-                    * rerank_score
+                score = (
+                    0.70
+                    * reranker_score
+
+                    + 0.18
+                    * semantic_norm
 
                     + 0.12
-                    * lexical_score
+                    * lexical_norm
+                )
 
-                    + 0.10
-                    * semantic_score
+            elif semantic:
 
-                    + 0.08
-                    * document_score
+                score = (
+                    0.54
+                    * semantic_norm
+
+                    + 0.46
+                    * lexical_norm
                 )
 
             else:
 
-                final_score = (
-                    0.46
-                    * lexical_score
-
-                    + 0.28
-                    * semantic_score
-
-                    + 0.12
-                    * document_score
+                score = (
+                    lexical_norm
                 )
 
-            if (
-                query_intent
-                == "definition"
-            ):
-
-                final_score += (
-                    0.34
-                    * definition_value
-                )
-
-            elif (
-                query_intent
-                == "list"
-            ):
-
-                final_score += (
-                    0.30
-                    * list_value
-                )
-
-            final_score *= (
+            score *= (
                 1.0
-                - 0.70
+                - 0.72
                 * penalty
+            )
+
+            score = _safe_score(
+                score
             )
 
             item.update(
                 {
                     "score":
                         round(
+                            score,
+                            6,
+                        ),
+
+                    "reranker_score":
+                        round(
                             float(
-                                final_score
+                                reranker_score
                             ),
                             6,
                         ),
@@ -1200,7 +843,25 @@ class Retriever:
                     "lexical_score":
                         round(
                             float(
-                                lexical[
+                                lexical[index]
+                            ),
+                            6,
+                        ),
+
+                    "word_score":
+                        round(
+                            float(
+                                word_scores[
+                                    index
+                                ]
+                            ),
+                            6,
+                        ),
+
+                    "char_score":
+                        round(
+                            float(
+                                char_scores[
                                     index
                                 ]
                             ),
@@ -1209,39 +870,18 @@ class Retriever:
 
                     "semantic_score":
                         round(
-                            semantic_raw,
-                            6,
-                        ),
-
-                    "reranker_score":
-                        round(
                             float(
-                                rerank_score
+                                semantic.get(
+                                    index,
+                                    0.0,
+                                )
                             ),
                             6,
                         ),
 
-                    "definition_score":
+                    "content_penalty":
                         round(
-                            float(
-                                definition_value
-                            ),
-                            6,
-                        ),
-
-                    "list_score":
-                        round(
-                            float(
-                                list_value
-                            ),
-                            6,
-                        ),
-
-                    "source_match":
-                        round(
-                            float(
-                                document_score
-                            ),
+                            penalty,
                             6,
                         ),
                 }
@@ -1259,25 +899,24 @@ class Retriever:
 
         selected = []
 
-        per_page = Counter()
-
         seen = set()
+
+        per_page = Counter()
 
         for item in ranked:
 
-            key = normalize(
+            key = _normalize(
                 item.get(
                     "text",
                     "",
                 )
-            )[:500]
+            )[:700]
+
+            if not key:
+                continue
 
             if key in seen:
                 continue
-
-            seen.add(
-                key
-            )
 
             page_key = (
                 item.get(
@@ -1300,6 +939,10 @@ class Retriever:
                 item
             )
 
+            seen.add(
+                key
+            )
+
             per_page[
                 page_key
             ] += 1
@@ -1315,15 +958,9 @@ class Retriever:
 
     def assess(
         self,
-        question: str,
-        results: list[dict],
+        question,
+        results,
     ):
-
-        query_intent = (
-            intent(
-                question
-            )
-        )
 
         best_score = max(
             (
@@ -1338,11 +975,11 @@ class Retriever:
             default=0.0,
         )
 
-        best_definition = max(
+        best_reranker = max(
             (
                 float(
                     item.get(
-                        "definition_score",
+                        "reranker_score",
                         0.0,
                     )
                 )
@@ -1351,57 +988,11 @@ class Retriever:
             default=0.0,
         )
 
-        best_list = max(
-            (
-                float(
-                    item.get(
-                        "list_score",
-                        0.0,
-                    )
-                )
-                for item in results
-            ),
-            default=0.0,
+        answerable = bool(
+            results
+            and best_score
+            >= RELEVANCE_THRESHOLD
         )
-
-        if (
-            query_intent
-            == "definition"
-        ):
-
-            # Better to return "not found"
-            # than random sentences about
-            # the same word.
-
-            answerable = bool(
-                results
-                and best_definition
-                >= 0.75
-            )
-
-        elif (
-            query_intent
-            == "list"
-        ):
-
-            answerable = bool(
-                results
-                and (
-                    best_list
-                    >= 0.45
-
-                    or best_score
-                    >= RELEVANCE_THRESHOLD
-                )
-            )
-
-        else:
-
-            answerable = bool(
-                results
-                and best_score
-                >= RELEVANCE_THRESHOLD
-            )
 
         return {
             "answerable":
@@ -1409,19 +1000,16 @@ class Retriever:
 
             "confidence":
                 round(
-                    best_score,
+                    _safe_score(
+                        best_score
+                    ),
                     4,
                 ),
 
-            "answerability":
+            "reranker_confidence":
                 round(
-                    (
-                        best_definition
-
-                        if query_intent
-                        == "definition"
-
-                        else best_list
+                    _safe_score(
+                        best_reranker
                     ),
                     4,
                 ),
@@ -1449,7 +1037,6 @@ def get_retriever():
     global _retriever
 
     if _retriever is None:
-
         _retriever = Retriever()
 
     return _retriever
