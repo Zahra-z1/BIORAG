@@ -40,7 +40,6 @@ You can ask questions such as:
 * Define genome.
 * What is a gene?
 * What is transcription?
-* What is the cell cycle?
 * Explain DNA replication.
 * Explain the structure of proteins.
 
