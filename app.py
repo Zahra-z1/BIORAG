@@ -172,10 +172,10 @@ if not messages:
     )
     c1, c2 = st.columns(2)
     suggestions = [
-        (c1, "🧬 What is a gene?", "What is a gene?"),
+        (c1, "🧬 What is a DNA?", "What is a DNA?"),
         (c2, "🔬 What is bioinformatics?", "What is bioinformatics?"),
         (c1, "🧪 Explain protein structure", "Explain the structure of proteins."),
-        (c2, "🧬 Explain DNA replication", "Explain DNA replication."),
+        (c2, "🧬 What are the phases of Cell Cycle?", "What are the phases of the cell cycle?"),
     ]
     for col, label, q in suggestions:
         with col:

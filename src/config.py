@@ -135,3 +135,33 @@ VECTORSTORE_DIR.mkdir(
     parents=True,
     exist_ok=True,
 )
+QA_MODEL = _setting(
+    "QA_MODEL",
+    "deepset/minilm-uncased-squad2",
+)
+
+ENABLE_QA_EXTRACTOR = _bool(
+    "ENABLE_QA_EXTRACTOR",
+    "true",
+)
+
+QA_TOP_CONTEXTS = int(
+    _setting("QA_TOP_CONTEXTS", "5")
+)
+
+QA_MIN_SCORE = float(
+    _setting("QA_MIN_SCORE", "0.06")
+)
+HYBRID_EVIDENCE_SENTENCES = int(
+    _setting(
+        "HYBRID_EVIDENCE_SENTENCES",
+        "8",
+    )
+)
+
+HYBRID_MAX_EVIDENCE_CHARS = int(
+    _setting(
+        "HYBRID_MAX_EVIDENCE_CHARS",
+        "2000",
+    )
+)
